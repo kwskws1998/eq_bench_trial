@@ -15,4 +15,5 @@ python emobench/run_emobench_et.py \
   --max-examples 5 \
   --conditions baseline text_context emotion_et_context text_plus_emotion_et_context gaze_query_attention_et \
   --predictor-backend "${PREDICTOR_BACKEND:-heuristic}" \
+  --scoring-mode generate \
   --overwrite

@@ -14,4 +14,5 @@ python emobench/run_emobench_et.py \
   --lang en \
   --conditions baseline text_context emotion_et_context text_plus_emotion_et_context gaze_query_attention_et \
   --predictor-backend skboy \
+  --scoring-mode generate \
   --overwrite

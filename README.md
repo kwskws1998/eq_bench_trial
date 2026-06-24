@@ -9,10 +9,18 @@ This directory is intentionally independent. Core code was copied into `core`, a
 The setup script downloads these official repositories as zip archives into `vendor/zips` and extracts them into `vendor/repos`.
 
 - EmoBench: `https://github.com/Sahandfer/EmoBench`
-- EQ-Bench: `https://github.com/EQ-bench/EQ-Bench`
+- EQ-Bench v2 legacy: `https://github.com/EQ-bench/EQ-Bench`
+- EQ-Bench 3: `https://github.com/EQ-bench/eqbench3` is downloaded for inspection only; it requires an LLM judge and is not run by this harness.
 - EmotionBench: `https://github.com/CUHK-ARISE/EmotionBench`
 
 EmotionQueen does not have a pinned official repo in this harness yet. Use `emotionqueen/run_emotionqueen_et.py --data-path ...` with a local JSON or JSONL dataset.
+
+## Metric Status
+
+- EmoBench: reports official task accuracy. Default `--scoring-mode generate` follows the benchmark's JSON generation/parsing protocol; `--scoring-mode loglik` is available only as a diagnostic shortcut.
+- EQ-Bench v2 legacy: reports `official_v2_score` using the repository's full-scale scoring formula. `mae`, `rmse`, and `accuracy_mae_le_2` are diagnostic only.
+- EmotionBench: reports official questionnaire category scores for target situations. Full official analysis additionally requires a matched control run and statistical comparison.
+- EmotionQueen-style: generic MCQA adapter only; not an official benchmark protocol unless the supplied dataset defines one.
 
 ## Conditions
 
@@ -99,6 +107,7 @@ python emobench/run_emobench_et.py \
   --lang en \
   --conditions baseline text_context emotion_et_context text_plus_emotion_et_context gaze_query_attention_et \
   --predictor-backend skboy \
+  --scoring-mode generate \
   --overwrite
 ```
 
@@ -153,6 +162,13 @@ Each runner writes:
 - `artifacts/<run>/predictions/*.jsonl`
 - `artifacts/<run>/results/summary.json`
 - `artifacts/<run>/results/by_condition.csv`
+
+Primary metrics:
+
+- `emobench`: `official_accuracy`
+- `eqbench`: `official_v2_score`
+- `emotionbench`: `official_target_mean_*`
+- `emotionqueen`: `generic_mcqa_accuracy`
 
 Bundle outputs for download:
 

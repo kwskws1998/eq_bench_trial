@@ -166,6 +166,7 @@ def score_prediction(predicted: dict[str, float], reference: dict[str, float]) -
             "missing_emotions": missing,
             "mae": None,
             "rmse": None,
+            "official_v2_item_score": None,
             "correct": False,
         }
     diffs = np.asarray([predicted[emotion] - reference[emotion] for emotion in reference], dtype=np.float64)
@@ -176,8 +177,29 @@ def score_prediction(predicted: dict[str, float], reference: dict[str, float]) -
         "missing_emotions": [],
         "mae": mae,
         "rmse": rmse,
+        "official_v2_item_score": official_v2_item_score(predicted, reference),
         "correct": mae <= 2.0,
     }
+
+
+def official_v2_item_score(predicted: dict[str, float], reference: dict[str, float]) -> float | None:
+    if len(predicted) != 4:
+        return None
+    pred_lower = {emotion.lower(): float(score) for emotion, score in predicted.items()}
+    ref_lower = {emotion.lower(): float(score) for emotion, score in reference.items()}
+    if set(pred_lower) != set(ref_lower):
+        return None
+    difference_tally = 0.0
+    for emotion, predicted_score in pred_lower.items():
+        diff = abs(predicted_score - ref_lower[emotion])
+        if diff == 0:
+            scaled_difference = 0.0
+        elif diff <= 5:
+            scaled_difference = 6.5 * (1 / (1 + np.e ** (-1.2 * (diff - 4))))
+        else:
+            scaled_difference = diff
+        difference_tally += scaled_difference
+    return 10 - (difference_tally * 0.7477)
 
 
 def summarize(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -185,11 +207,13 @@ def summarize(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str
     for condition in sorted({row["condition"] for row in rows}):
         group = [row for row in rows if row["condition"] == condition]
         parsed = [row for row in group if row["parse_ok"]]
+        official_scores = [row["official_v2_item_score"] for row in group if row["official_v2_item_score"] is not None]
         by_condition.append(
             {
                 "condition": condition,
                 "count": len(group),
                 "parse_rate": len(parsed) / len(group) if group else 0.0,
+                "official_v2_score": float(100 * np.mean(official_scores) / 10) if official_scores else None,
                 "mae": float(np.mean([row["mae"] for row in parsed])) if parsed else None,
                 "rmse": float(np.mean([row["rmse"] for row in parsed])) if parsed else None,
                 "accuracy_mae_le_2": float(np.mean([1.0 if row["correct"] else 0.0 for row in group])),

@@ -107,14 +107,23 @@ def format_question_list(questions: dict[str, str]) -> str:
 
 def format_prompt(situation: str, questionnaire: dict[str, Any]) -> str:
     return (
-        "Imagine you are the protagonist in the scenario below.\n\n"
-        f"Scenario:\n{situation}\n\n"
+        "## Task\n\n"
+        f"Imagine you are the protagonist in the scenario: \"{situation}\".\n\n"
         f"{questionnaire['instruction']}\n"
         f"{format_scale_descriptions(questionnaire['scaling'])}\n\n"
         f"Please score them one by one using the scale from {questionnaire['min_score']} "
         f"to {questionnaire['max_score']}:\n"
         f"{format_question_list(questionnaire['questions'])}\n\n"
-        "Output JSON only, mapping question numbers to scores."
+        "## Output\n"
+        "Please output a JSON format that maps question numbers to their scores, like so:\n"
+        "```json\n"
+        "{\n"
+        '  "1": x,\n'
+        '  "2": y,\n'
+        "  ...\n"
+        "}\n"
+        "```\n"
+        "Do not include any explanations or additional text."
     )
 
 
@@ -170,9 +179,14 @@ def summarize(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str
         }
         for category in category_names:
             values = [float(row["category_scores"][category]) for row in parsed if category in row["category_scores"]]
-            summary_row[f"mean_{category}"] = float(mean(values)) if values else None
+            summary_row[f"official_target_mean_{category}"] = float(mean(values)) if values else None
         by_condition.append(summary_row)
-    return {"prediction_records": len(rows), "by_condition": by_condition}, by_condition
+    return {
+        "prediction_records": len(rows),
+        "metric": "official_category_scores_target_only",
+        "benchmark_protocol": "EmotionBench target-condition scoring; full official analysis also requires a matched control run",
+        "by_condition": by_condition,
+    }, by_condition
 
 
 def main() -> None:
@@ -198,6 +212,7 @@ def main() -> None:
                 "artifacts_dir": str(args.artifacts_dir),
                 "predictions_path": str(prediction_path),
                 "flush_every": args.flush_every,
+                "metric": "official_category_scores_target_only",
             },
             indent=2,
         ),

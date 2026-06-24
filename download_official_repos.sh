@@ -19,7 +19,8 @@ download_zip() {
 }
 
 download_zip "EmoBench" "https://github.com/Sahandfer/EmoBench/archive/refs/heads/master.zip"
-download_zip "EQ-Bench" "https://github.com/EQ-bench/EQ-Bench/archive/refs/heads/master.zip"
+download_zip "EQ-Bench-v2-legacy" "https://github.com/EQ-bench/EQ-Bench/archive/refs/heads/master.zip"
+download_zip "EQ-Bench-3" "https://github.com/EQ-bench/eqbench3/archive/refs/heads/main.zip"
 download_zip "EmotionBench" "https://github.com/CUHK-ARISE/EmotionBench/archive/refs/heads/main.zip"
 
 echo "EmotionQueen official code repo was not pinned here; use emotionqueen/run_emotionqueen_et.py with --data-path."

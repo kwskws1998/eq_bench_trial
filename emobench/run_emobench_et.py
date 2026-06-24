@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import string
 import sys
 import time
@@ -18,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 from core.context_selection import BASELINE, ContextSelector
 from core.io_utils import read_jsonl, write_csv, write_json, write_jsonl
-from core.llm_scoring import load_generator, score_answer_options
+from core.llm_scoring import generate_text, load_generator, score_answer_options
 
 
 LETTERS = string.ascii_uppercase
@@ -57,6 +58,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--predictor-subfolder", default="hf_emotion_et_aug_lr2e-5_len256_seed123")
     parser.add_argument("--predictor-local-files-only", action="store_true")
     parser.add_argument("--max-length", type=int, default=4096)
+    parser.add_argument("--max-new-tokens", type=int, default=80)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--scoring-mode", choices=["generate", "loglik"], default="generate")
     parser.add_argument("--score-normalization", choices=["mean", "sum"], default="mean")
     parser.add_argument("--flush-every", type=int, default=25)
     parser.add_argument("--log-every", type=int, default=25)
@@ -99,28 +103,89 @@ def rank_choices(choices: list[str]) -> str:
     return "\n".join(f"{LETTERS[index]}) {choice}" for index, choice in enumerate(choices))
 
 
+def official_response_format(task: str) -> str:
+    if task == "EA":
+        conditions = '"answer": "<Respond with the corresponding letter numbering>"'
+    elif task == "EU":
+        conditions = (
+            '"answer_q1": "<Respond to the Question 1 with the corresponding letter numbering>",\n'
+            '    "answer_q2": "<Respond to the Question 2 with the corresponding letter numbering>"'
+        )
+    else:
+        raise ValueError(f"Unsupported task: {task}")
+    return (
+        "Provide only one single correct answer to this question. "
+        "Do not provide any additional information or explanations.\n"
+        "The response should be in the following JSON format:\n"
+        "```json\n"
+        "    {\n"
+        f"    {conditions}\n"
+        "    }\n"
+        "```"
+    )
+
+
+def official_system_prompt(task: str) -> str:
+    return (
+        "# Instructions\n\n"
+        "In this task, you are presented with a scenario, a question, and multiple choices.\n"
+        "Carefully analyze the scenario and take the perspective of the individual involved.\n"
+        "Then, select the option that best reflects their perspective or emotional response.\n\n"
+        "# Output\n"
+        f"{official_response_format(task)}"
+    )
+
+
 def format_eu_prompt(scenario: str, subject: str, emotion_choices: list[str], cause_choices: list[str]) -> str:
     return (
-        "Read the scenario and answer both multiple-choice questions.\n\n"
-        f"Scenario:\n{scenario}\n\n"
-        f"Subject: {subject}\n\n"
-        "Question 1: Which emotion is the subject most likely feeling?\n"
+        f"{official_system_prompt('EU')}\n\n"
+        "## Scenario\n"
+        f"{scenario}\n\n"
+        "## Question 1\n"
+        f"What emotion(s) would {subject} ultimately feel in this situation?\n\n"
+        "## Choices for Question 1\n"
         f"{rank_choices(emotion_choices)}\n\n"
-        "Question 2: Which cause best explains the emotion?\n"
-        f"{rank_choices(cause_choices)}\n\n"
-        "Answer with the selected option text."
+        "## Question 2\n"
+        f"Why would {subject} feel these emotions in this situation?\n\n"
+        "## Choices for Question 2\n"
+        f"{rank_choices(cause_choices)}\n"
     )
 
 
 def format_ea_prompt(scenario: str, subject: str, q_type: str, choices: list[str]) -> str:
     return (
-        "Read the scenario and choose the best emotional intelligence response.\n\n"
-        f"Scenario:\n{scenario}\n\n"
-        f"Subject: {subject}\n"
-        f"Question type: {q_type}\n\n"
-        f"{rank_choices(choices)}\n\n"
-        "Answer with the selected option text."
+        f"{official_system_prompt('EA')}\n\n"
+        "## Scenario\n"
+        f"{scenario}\n\n"
+        "## Question\n"
+        f"In this scenario, what is the most effective {q_type} for {subject}?\n\n"
+        "## Choices\n"
+        f"{rank_choices(choices)}\n"
     )
+
+
+def parse_json_response(raw: str) -> dict[str, Any] | None:
+    match = re.search(r"```json\s*([\s\S]*?)```", raw)
+    if match:
+        raw = match.group(1)
+    else:
+        match = re.search(r"\{[\s\S]*\}", raw)
+        if match:
+            raw = match.group(0)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def normalize_letter(value: Any, num_choices: int) -> str:
+    text = str(value).strip().upper()
+    match = re.search(r"\b([A-Z])\b", text)
+    if not match:
+        return ""
+    letter = match.group(1)
+    return letter if letter in LETTERS[:num_choices] else ""
 
 
 def score_eu(bundle, row: dict[str, Any], scenario: str, args: argparse.Namespace) -> dict[str, Any]:
@@ -130,24 +195,45 @@ def score_eu(bundle, row: dict[str, Any], scenario: str, args: argparse.Namespac
         list(row["emotion_choices"]),
         list(row["cause_choices"]),
     )
+    emotion_gold = list(row["emotion_choices"]).index(row["emotion_label"])
+    cause_gold = list(row["cause_choices"]).index(row["cause_label"])
+    if args.scoring_mode == "generate":
+        raw = generate_text(
+            bundle,
+            prompt,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            max_length=args.max_length,
+        )
+        parsed = parse_json_response(raw) or {}
+        emotion_answer = normalize_letter(parsed.get("answer_q1", ""), len(row["emotion_choices"]))
+        cause_answer = normalize_letter(parsed.get("answer_q2", ""), len(row["cause_choices"]))
+        return {
+            "emotion_pred": emotion_answer,
+            "emotion_gold": LETTERS[emotion_gold],
+            "cause_pred": cause_answer,
+            "cause_gold": LETTERS[cause_gold],
+            "correct": emotion_answer == LETTERS[emotion_gold] and cause_answer == LETTERS[cause_gold],
+            "raw_output": raw,
+            "parse_ok": bool(emotion_answer and cause_answer),
+            "scoring_mode": args.scoring_mode,
+        }
     emotion_scores = score_answer_options(
         bundle,
         prompt + "\nQuestion 1 answer: ",
-        [str(choice) for choice in row["emotion_choices"]],
+        [LETTERS[index] for index in range(len(row["emotion_choices"]))],
         max_length=args.max_length,
         normalization=args.score_normalization,
     )
     cause_scores = score_answer_options(
         bundle,
         prompt + "\nQuestion 2 answer: ",
-        [str(choice) for choice in row["cause_choices"]],
+        [LETTERS[index] for index in range(len(row["cause_choices"]))],
         max_length=args.max_length,
         normalization=args.score_normalization,
     )
     emotion_pred = int(np.argmax(emotion_scores))
     cause_pred = int(np.argmax(cause_scores))
-    emotion_gold = list(row["emotion_choices"]).index(row["emotion_label"])
-    cause_gold = list(row["cause_choices"]).index(row["cause_label"])
     return {
         "emotion_pred": LETTERS[emotion_pred],
         "emotion_gold": LETTERS[emotion_gold],
@@ -156,6 +242,8 @@ def score_eu(bundle, row: dict[str, Any], scenario: str, args: argparse.Namespac
         "correct": emotion_pred == emotion_gold and cause_pred == cause_gold,
         "emotion_scores": emotion_scores.tolist(),
         "cause_scores": cause_scores.tolist(),
+        "parse_ok": True,
+        "scoring_mode": args.scoring_mode,
     }
 
 
@@ -166,20 +254,40 @@ def score_ea(bundle, row: dict[str, Any], scenario: str, args: argparse.Namespac
         str(row["question type"]),
         [str(choice) for choice in row["choices"]],
     )
+    gold = list(row["choices"]).index(row["label"])
+    if args.scoring_mode == "generate":
+        raw = generate_text(
+            bundle,
+            prompt,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            max_length=args.max_length,
+        )
+        parsed = parse_json_response(raw) or {}
+        answer = normalize_letter(parsed.get("answer", ""), len(row["choices"]))
+        return {
+            "pred": answer,
+            "gold": LETTERS[gold],
+            "correct": answer == LETTERS[gold],
+            "raw_output": raw,
+            "parse_ok": bool(answer),
+            "scoring_mode": args.scoring_mode,
+        }
     scores = score_answer_options(
         bundle,
         prompt + "\nAnswer: ",
-        [str(choice) for choice in row["choices"]],
+        [LETTERS[index] for index in range(len(row["choices"]))],
         max_length=args.max_length,
         normalization=args.score_normalization,
     )
     pred = int(np.argmax(scores))
-    gold = list(row["choices"]).index(row["label"])
     return {
         "pred": LETTERS[pred],
         "gold": LETTERS[gold],
         "correct": pred == gold,
         "scores": scores.tolist(),
+        "parse_ok": True,
+        "scoring_mode": args.scoring_mode,
     }
 
 
@@ -216,12 +324,15 @@ def summarize(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str
                 "task": task,
                 "language": language,
                 "count": len(group),
-                "accuracy": float(np.mean([1.0 if row["correct"] else 0.0 for row in group])),
+                "official_accuracy": float(np.mean([1.0 if row["correct"] else 0.0 for row in group])),
+                "parse_rate": float(np.mean([1.0 if row.get("parse_ok", True) else 0.0 for row in group])),
                 "mean_compression_ratio": float(np.mean([float(row["compression_ratio"]) for row in group])),
             }
         )
     summary = {
         "prediction_records": len(rows),
+        "metric": "official_accuracy",
+        "scoring_protocol": rows[0].get("scoring_mode", "unknown") if rows else None,
         "conditions": sorted({row["condition"] for row in rows}),
         "by_condition": by_condition,
     }
@@ -251,6 +362,8 @@ def main() -> None:
                 "artifacts_dir": str(args.artifacts_dir),
                 "predictions_path": str(prediction_path),
                 "flush_every": args.flush_every,
+                "metric": "official_accuracy",
+                "scoring_mode": args.scoring_mode,
             },
             indent=2,
         ),

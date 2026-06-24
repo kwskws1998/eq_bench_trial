@@ -142,11 +142,16 @@ def summarize(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str
             {
                 "condition": condition,
                 "count": len(group),
-                "accuracy": float(np.mean([1.0 if row["correct"] else 0.0 for row in group])),
+                "generic_mcqa_accuracy": float(np.mean([1.0 if row["correct"] else 0.0 for row in group])),
                 "mean_compression_ratio": float(np.mean([float(row["compression_ratio"]) for row in group])),
             }
         )
-    return {"prediction_records": len(rows), "by_condition": by_condition}, by_condition
+    return {
+        "prediction_records": len(rows),
+        "metric": "generic_mcqa_accuracy",
+        "benchmark_protocol": "generic EmotionQueen-style JSON/JSONL adapter; not an official benchmark protocol",
+        "by_condition": by_condition,
+    }, by_condition
 
 
 def main() -> None:
@@ -169,6 +174,7 @@ def main() -> None:
                 "artifacts_dir": str(args.artifacts_dir),
                 "predictions_path": str(prediction_path),
                 "flush_every": args.flush_every,
+                "metric": "generic_mcqa_accuracy",
             },
             indent=2,
         ),
