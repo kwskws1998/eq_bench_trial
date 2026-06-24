@@ -1,0 +1,12 @@
+numpy>=1.24
+pandas>=2.0
+torch>=2.2
+transformers>=4.45,<5
+accelerate>=0.30
+huggingface_hub>=0.23,<1.0
+safetensors>=0.4
+sentencepiece>=0.2
+protobuf>=4.25
+tqdm>=4.66
+scipy>=1.11
+pyyaml>=6.0
