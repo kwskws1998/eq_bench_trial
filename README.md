@@ -2,7 +2,7 @@
 
 Standalone harness for testing whether an emotion-specific ET predictor helps emotion benchmarks through context selection or predicted-gaze attention.
 
-This directory is intentionally independent from `src/gaze_query_rag`. Core code was copied into `emotion_et_benchmarks/core` so the folder can be moved to a GPU machine as a self-contained experiment.
+This directory is intentionally independent. Core code was copied into `core`, and official benchmark repos are kept under `vendor`, so this folder can be moved or cloned as a self-contained experiment.
 
 ## Included Official Repos
 
@@ -25,10 +25,10 @@ EmotionQueen does not have a pinned official repo in this harness yet. Use `emot
 ## Setup
 
 ```bash
-cd /workspace/gaze_query_rag_project/emotion_et_benchmarks
+cd emotion_et_benchmarks
 
 export HF_TOKEN="your_hf_token"
-huggingface-cli login --token "$HF_TOKEN"
+hf auth login --token "$HF_TOKEN"
 
 DOWNLOAD_REPOS=1 DOWNLOAD_HF=1 RUN_SMOKE=1 bash setup_emotion_benchmarks.sh
 ```
@@ -71,6 +71,15 @@ export MODEL_NAME=meta-llama/Meta-Llama-3-8B-Instruct
 export DEVICE=cuda
 export DTYPE=float16
 bash run_all_llama3.sh
+```
+
+EQ-Bench only:
+
+```bash
+export MODEL_NAME=meta-llama/Meta-Llama-3-8B-Instruct
+export DEVICE=cuda
+export DTYPE=float16
+bash run_eqbench_llama3.sh
 ```
 
 Set `EMOTIONQUEEN_DATA_PATH=/path/to/data.jsonl` before `run_all_smoke.sh` or `run_all_llama3.sh` if you want the generic EmotionQueen adapter included.

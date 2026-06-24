@@ -1,5 +1,6 @@
 numpy>=1.24
 pandas>=2.0
+setuptools<82
 torch>=2.2
 transformers>=4.45,<5
 accelerate>=0.30

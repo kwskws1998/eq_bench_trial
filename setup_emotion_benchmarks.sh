@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-python -m pip install --upgrade pip setuptools wheel
+python -m pip install --upgrade pip wheel
 python -m pip install -r requirements.txt
 
 if [ "${DOWNLOAD_REPOS:-1}" = "1" ]; then
@@ -23,6 +23,7 @@ snapshot_download(
     ],
 )
 hf_hub_download("intfloat/e5-large-v2", "config.json")
+hf_hub_download("meta-llama/Meta-Llama-3-8B-Instruct", "config.json")
 print("HF assets cached")
 PY
 fi
