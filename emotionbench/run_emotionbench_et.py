@@ -5,11 +5,13 @@ import argparse
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -58,6 +60,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--flush-every", type=int, default=10)
+    parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--disable-progress", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -181,49 +185,93 @@ def main() -> None:
     generator = load_generator(args.model_name, args.device, args.dtype, args.cache_dir)
     selectors = {condition: build_selector(condition, args) for condition in args.conditions}
     situations = load_situations(args)
-    results: list[dict[str, Any]] = []
-    for condition in args.conditions:
-        selector = selectors[condition]
-        for row in situations:
-            situation = str(row["text"])
-            if selector is None:
-                selection = ContextSelector(BASELINE).select(situation, args.questionnaire)
-            else:
-                selection = selector.select(situation, args.questionnaire)
-            prompt = format_prompt(selection.selected_context, questionnaire)
-            raw = generate_text(
-                generator,
-                prompt,
-                max_new_tokens=args.max_new_tokens,
-                temperature=args.temperature,
-                max_length=args.max_length,
-            )
-            parsed = parse_json_scores(raw, int(questionnaire["min_score"]), int(questionnaire["max_score"]))
-            category_scores = compute_category_scores(parsed, questionnaire)
-            out = {
-                "id": f"{row['situation_id']}::{args.questionnaire}::{condition}",
-                "condition": condition,
+    total_records = len(args.conditions) * len(situations)
+    start_time = time.time()
+    print(
+        json.dumps(
+            {
+                "benchmark": "emotionbench",
                 "questionnaire": args.questionnaire,
-                "situation_id": row["situation_id"],
-                "emotion": row["emotion"],
-                "factor": row["factor"],
-                "raw_output": raw,
-                "parsed_scores": parsed,
-                "parse_ok": bool(parsed),
-                "category_scores": category_scores,
-                "original_word_count": selection.original_word_count,
-                "selected_word_count": selection.selected_word_count,
-                "compression_ratio": selection.compression_ratio,
-                "selected_chunk_count": len(selection.selected_chunks),
-            }
-            results.append(out)
-            if len(results) % args.flush_every == 0:
-                write_jsonl(prediction_path, results)
+                "situations": len(situations),
+                "conditions": args.conditions,
+                "total_records": total_records,
+                "artifacts_dir": str(args.artifacts_dir),
+                "predictions_path": str(prediction_path),
+                "flush_every": args.flush_every,
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+    results: list[dict[str, Any]] = []
+    progress = tqdm(
+        total=total_records,
+        desc="emotionbench",
+        unit="record",
+        disable=args.disable_progress,
+    )
+    try:
+        for condition in args.conditions:
+            selector = selectors[condition]
+            progress.write(f"[emotionbench] condition start: {condition} ({len(situations)} situations)")
+            condition_start = time.time()
+            condition_records = 0
+            for row in situations:
+                situation = str(row["text"])
+                if selector is None:
+                    selection = ContextSelector(BASELINE).select(situation, args.questionnaire)
+                else:
+                    selection = selector.select(situation, args.questionnaire)
+                prompt = format_prompt(selection.selected_context, questionnaire)
+                raw = generate_text(
+                    generator,
+                    prompt,
+                    max_new_tokens=args.max_new_tokens,
+                    temperature=args.temperature,
+                    max_length=args.max_length,
+                )
+                parsed = parse_json_scores(raw, int(questionnaire["min_score"]), int(questionnaire["max_score"]))
+                category_scores = compute_category_scores(parsed, questionnaire)
+                out = {
+                    "id": f"{row['situation_id']}::{args.questionnaire}::{condition}",
+                    "condition": condition,
+                    "questionnaire": args.questionnaire,
+                    "situation_id": row["situation_id"],
+                    "emotion": row["emotion"],
+                    "factor": row["factor"],
+                    "raw_output": raw,
+                    "parsed_scores": parsed,
+                    "parse_ok": bool(parsed),
+                    "category_scores": category_scores,
+                    "original_word_count": selection.original_word_count,
+                    "selected_word_count": selection.selected_word_count,
+                    "compression_ratio": selection.compression_ratio,
+                    "selected_chunk_count": len(selection.selected_chunks),
+                }
+                results.append(out)
+                condition_records += 1
+                progress.update(1)
+                progress.set_postfix(condition=condition, row=condition_records)
+                if len(results) % args.flush_every == 0:
+                    write_jsonl(prediction_path, results)
+                    progress.write(
+                        f"[emotionbench] flushed {len(results)}/{total_records} records -> {prediction_path}"
+                    )
+                elif args.log_every > 0 and condition_records % args.log_every == 0:
+                    progress.write(
+                        f"[emotionbench] progress condition={condition} "
+                        f"{condition_records}/{len(situations)}; total={len(results)}/{total_records}"
+                    )
+            elapsed = time.time() - condition_start
+            progress.write(f"[emotionbench] condition done: {condition}; elapsed={elapsed:.1f}s")
+    finally:
+        progress.close()
     write_jsonl(prediction_path, results)
     summary, by_condition = summarize(results)
+    summary["elapsed_seconds"] = time.time() - start_time
     write_json(args.artifacts_dir / "results" / "summary.json", summary)
     write_csv(args.artifacts_dir / "results" / "by_condition.csv", by_condition)
-    print(summary)
+    print(json.dumps(summary, indent=2), flush=True)
 
 
 if __name__ == "__main__":

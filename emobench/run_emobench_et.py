@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import string
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -56,6 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=4096)
     parser.add_argument("--score-normalization", choices=["mean", "sum"], default="mean")
     parser.add_argument("--flush-every", type=int, default=25)
+    parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--disable-progress", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -231,43 +236,94 @@ def main() -> None:
     args.artifacts_dir.mkdir(parents=True, exist_ok=True)
     generator = load_generator(args.model_name, args.device, args.dtype, args.cache_dir)
     selectors = {condition: build_selector(condition, args) for condition in args.conditions}
+    rows_by_task = {task: load_rows(args.repo_dir, task, args.lang, args.max_examples) for task in args.tasks}
+    total_rows = sum(len(rows) for rows in rows_by_task.values())
+    total_records = len(args.conditions) * total_rows
+    start_time = time.time()
+    print(
+        json.dumps(
+            {
+                "benchmark": "emobench",
+                "tasks": args.tasks,
+                "rows_by_task": {task: len(rows) for task, rows in rows_by_task.items()},
+                "conditions": args.conditions,
+                "total_records": total_records,
+                "artifacts_dir": str(args.artifacts_dir),
+                "predictions_path": str(prediction_path),
+                "flush_every": args.flush_every,
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
 
     results: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []
-    for condition in args.conditions:
-        selector = selectors[condition]
-        for task in args.tasks:
-            rows = load_rows(args.repo_dir, task, args.lang, args.max_examples)
-            for row in rows:
-                scenario = str(row["scenario"])
-                query = scenario
-                if task == "EA":
-                    query = f"{row.get('question type', '')} {row.get('subject', '')}"
-                selection = selector.select(scenario, query) if selector is not None else ContextSelector(BASELINE).select(scenario, query)
-                if task == "EU":
-                    scored = score_eu(generator, row, selection.selected_context, args)
-                else:
-                    scored = score_ea(generator, row, selection.selected_context, args)
-                out = {
-                    "id": f"{task}:{row['language']}:{row['qid']}::{condition}",
-                    "condition": condition,
-                    "task": task,
-                    "language": row["language"],
-                    "qid": row["qid"],
-                    "category": row.get("coarse_category") or row.get("category"),
-                    **result_metadata(selection),
-                    **scored,
-                }
-                results.append(out)
-                pending.append(out)
-                if len(pending) >= args.flush_every:
-                    write_jsonl(prediction_path, results)
-                    pending.clear()
+    progress = tqdm(
+        total=total_records,
+        desc="emobench",
+        unit="record",
+        disable=args.disable_progress,
+    )
+    try:
+        for condition in args.conditions:
+            selector = selectors[condition]
+            progress.write(f"[emobench] condition start: {condition} ({total_rows} rows)")
+            condition_start = time.time()
+            condition_records = 0
+            for task in args.tasks:
+                rows = rows_by_task[task]
+                progress.write(f"[emobench] task start: {task} ({len(rows)} rows)")
+                for row in rows:
+                    scenario = str(row["scenario"])
+                    query = scenario
+                    if task == "EA":
+                        query = f"{row.get('question type', '')} {row.get('subject', '')}"
+                    selection = (
+                        selector.select(scenario, query)
+                        if selector is not None
+                        else ContextSelector(BASELINE).select(scenario, query)
+                    )
+                    if task == "EU":
+                        scored = score_eu(generator, row, selection.selected_context, args)
+                    else:
+                        scored = score_ea(generator, row, selection.selected_context, args)
+                    out = {
+                        "id": f"{task}:{row['language']}:{row['qid']}::{condition}",
+                        "condition": condition,
+                        "task": task,
+                        "language": row["language"],
+                        "qid": row["qid"],
+                        "category": row.get("coarse_category") or row.get("category"),
+                        **result_metadata(selection),
+                        **scored,
+                    }
+                    results.append(out)
+                    pending.append(out)
+                    condition_records += 1
+                    progress.update(1)
+                    progress.set_postfix(condition=condition, task=task)
+                    if len(pending) >= args.flush_every:
+                        write_jsonl(prediction_path, results)
+                        pending.clear()
+                        progress.write(
+                            f"[emobench] flushed {len(results)}/{total_records} records -> {prediction_path}"
+                        )
+                    elif args.log_every > 0 and condition_records % args.log_every == 0:
+                        progress.write(
+                            f"[emobench] progress condition={condition} "
+                            f"{condition_records}/{total_rows}; total={len(results)}/{total_records}"
+                        )
+            elapsed = time.time() - condition_start
+            progress.write(f"[emobench] condition done: {condition}; elapsed={elapsed:.1f}s")
+    finally:
+        progress.close()
     write_jsonl(prediction_path, results)
     summary, by_condition = summarize(results)
+    summary["elapsed_seconds"] = time.time() - start_time
     write_json(args.artifacts_dir / "results" / "summary.json", summary)
     write_csv(args.artifacts_dir / "results" / "by_condition.csv", by_condition)
-    print(summary)
+    print(json.dumps(summary, indent=2), flush=True)
 
 
 if __name__ == "__main__":

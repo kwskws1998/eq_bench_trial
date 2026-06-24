@@ -5,10 +5,12 @@ import argparse
 import json
 import string
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -54,6 +56,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--predictor-local-files-only", action="store_true")
     parser.add_argument("--max-length", type=int, default=4096)
     parser.add_argument("--score-normalization", choices=["mean", "sum"], default="mean")
+    parser.add_argument("--flush-every", type=int, default=25)
+    parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--disable-progress", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -152,44 +157,89 @@ def main() -> None:
     rows = load_rows(args.data_path, args.max_examples)
     generator = load_generator(args.model_name, args.device, args.dtype, args.cache_dir)
     selectors = {condition: build_selector(condition, args) for condition in args.conditions}
+    total_records = len(args.conditions) * len(rows)
+    start_time = time.time()
+    print(
+        json.dumps(
+            {
+                "benchmark": "emotionqueen",
+                "rows": len(rows),
+                "conditions": args.conditions,
+                "total_records": total_records,
+                "artifacts_dir": str(args.artifacts_dir),
+                "predictions_path": str(prediction_path),
+                "flush_every": args.flush_every,
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
     results: list[dict[str, Any]] = []
-    for condition in args.conditions:
-        selector = selectors[condition]
-        for index, row in enumerate(rows):
-            context, question, choices, gold = infer_example(row)
-            if selector is None:
-                selection = ContextSelector(BASELINE).select(context, question)
-            else:
-                selection = selector.select(context, question)
-            scores = score_answer_options(
-                generator,
-                format_prompt(selection.selected_context, question, choices),
-                choices,
-                max_length=args.max_length,
-                normalization=args.score_normalization,
-            )
-            pred_index = int(np.argmax(scores))
-            pred = choices[pred_index]
-            results.append(
-                {
-                    "id": f"emotionqueen:{index}::{condition}",
-                    "condition": condition,
-                    "row_index": index,
-                    "pred": pred,
-                    "gold": gold,
-                    "correct": pred == gold,
-                    "scores": scores.tolist(),
-                    "original_word_count": selection.original_word_count,
-                    "selected_word_count": selection.selected_word_count,
-                    "compression_ratio": selection.compression_ratio,
-                    "selected_chunk_count": len(selection.selected_chunks),
-                }
-            )
+    progress = tqdm(
+        total=total_records,
+        desc="emotionqueen",
+        unit="record",
+        disable=args.disable_progress,
+    )
+    try:
+        for condition in args.conditions:
+            selector = selectors[condition]
+            progress.write(f"[emotionqueen] condition start: {condition} ({len(rows)} rows)")
+            condition_start = time.time()
+            condition_records = 0
+            for index, row in enumerate(rows):
+                context, question, choices, gold = infer_example(row)
+                if selector is None:
+                    selection = ContextSelector(BASELINE).select(context, question)
+                else:
+                    selection = selector.select(context, question)
+                scores = score_answer_options(
+                    generator,
+                    format_prompt(selection.selected_context, question, choices),
+                    choices,
+                    max_length=args.max_length,
+                    normalization=args.score_normalization,
+                )
+                pred_index = int(np.argmax(scores))
+                pred = choices[pred_index]
+                results.append(
+                    {
+                        "id": f"emotionqueen:{index}::{condition}",
+                        "condition": condition,
+                        "row_index": index,
+                        "pred": pred,
+                        "gold": gold,
+                        "correct": pred == gold,
+                        "scores": scores.tolist(),
+                        "original_word_count": selection.original_word_count,
+                        "selected_word_count": selection.selected_word_count,
+                        "compression_ratio": selection.compression_ratio,
+                        "selected_chunk_count": len(selection.selected_chunks),
+                    }
+                )
+                condition_records += 1
+                progress.update(1)
+                progress.set_postfix(condition=condition, row=condition_records)
+                if len(results) % args.flush_every == 0:
+                    write_jsonl(prediction_path, results)
+                    progress.write(
+                        f"[emotionqueen] flushed {len(results)}/{total_records} records -> {prediction_path}"
+                    )
+                elif args.log_every > 0 and condition_records % args.log_every == 0:
+                    progress.write(
+                        f"[emotionqueen] progress condition={condition} "
+                        f"{condition_records}/{len(rows)}; total={len(results)}/{total_records}"
+                    )
+            elapsed = time.time() - condition_start
+            progress.write(f"[emotionqueen] condition done: {condition}; elapsed={elapsed:.1f}s")
+    finally:
+        progress.close()
     write_jsonl(prediction_path, results)
     summary, by_condition = summarize(results)
+    summary["elapsed_seconds"] = time.time() - start_time
     write_json(args.artifacts_dir / "results" / "summary.json", summary)
     write_csv(args.artifacts_dir / "results" / "by_condition.csv", by_condition)
-    print(summary)
+    print(json.dumps(summary, indent=2), flush=True)
 
 
 if __name__ == "__main__":
